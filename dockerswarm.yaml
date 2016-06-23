@@ -1,0 +1,157 @@
+heat_template_version: 2014-10-16
+
+description: Deploys a Docker Swarm
+
+parameters:
+  docker_node_count:
+    type: number
+    label: Docker Hosts
+    description: Number of docker hosts (excluding the master)
+    default: 2
+
+  public_net_id:
+    type: string
+    label: Public Network UUID
+    description: UUID of public network from which floating IP addresses will be allocated
+
+  instance_flavor:
+    type: string
+    label: Flavor
+    default: m1.medium
+    description: Flavor to use for Docker
+    constraints:
+    - allowed_values:
+      - m1.small
+      - m1.medium
+      - m1.large
+      - m1.xlarge
+
+  instance_image:
+    type: string
+    label: Image
+    default: ubuntu_1404_server_cloudimg_amd64
+    description: Image to be used for all servers in this stack
+
+resources:
+  #SSH Key
+  ssh_key:
+    type: OS::Nova::KeyPair
+    properties:
+      name: { get_param: "OS::stack_id" }
+      save_private_key: true
+
+  #Networking
+  tenant_network:
+    type: OS::Neutron::Net
+    properties:
+      name: docker
+      shared: false
+
+  tenant_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: tenant_network }
+      ip_version: 4
+      dns_nameservers: [8.8.8.8]
+      cidr: 10.0.2.0/24
+      gateway_ip: 10.0.2.1
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      name: DcokerRouter
+      external_gateway_info:
+        network: { get_param: public_net_id }
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet_id: { get_resource: tenant_subnet }
+
+  docker_master_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_resource: tenant_network }
+      fixed_ips:
+        - subnet_id: { get_resource: tenant_subnet }
+          ip_address: 10.0.2.21
+      security_groups: [{ get_resource: docker_security_group }]
+
+  docker_floating_ip:
+    type: OS::Neutron::FloatingIP
+    depends_on: router_interface
+    properties:
+      floating_network_id: { get_param: public_net_id }
+      port_id: { get_resource: docker_master_port }
+
+  docker_security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      description:
+      name: docker-security-group
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 22
+          port_range_max: 22
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 2377
+          port_range_max: 2377
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: icmp
+        - remote_mode: remote_group_id
+          protocol: tcp
+          port_range_min: 1
+          port_range_max: 65535
+        - remote_mode: remote_group_id
+          protocol: udp
+          port_range_min: 1
+          port_range_max: 65535
+
+  #Master Server
+  docker_master:
+    type: OS::Nova::Server
+    properties:
+      name: dockermaster
+      image: { get_param: instance_image }
+      flavor: { get_param: instance_flavor }
+      key_name: { get_resource: ssh_key }
+      networks:
+        - port: { get_resource: docker_master_port }
+      user_data_format: RAW
+      user_data: |
+        #!/bin/bash
+        apt-get update
+        apt-get -y upgrade
+        apt-get install -y wget software-properties-common
+        wget -q https://test.docker.com/ -O /root/install_docker.sh
+        chmod 755 /root/install_docker.sh
+        /bin/bash /root/install_docker.sh
+        docker swarm init --listen-addr 0.0.0.0:2377
+
+  #Other Docker Swarm members
+  docker_nodes:
+    type: OS::Heat::ResourceGroup
+    depends_on: docker_master
+    properties:
+      count: { get_param: docker_node_count }
+      resource_def:
+        type: dockernode.yaml
+        properties:
+          hostname:         docker_node_%index%
+          public_net_id:    { get_param: public_net_id }
+          instance_flavor:  { get_param: instance_flavor }
+          instance_image:   { get_param: instance_image }
+          tenant_network:   { get_resource: tenant_network }
+          docker_security_group: { get_resource: docker_security_group }
+          ssh_key:          { get_resource: ssh_key }
+
+outputs:
+  docker_ip:
+    description: Master Public IP
+    value: { get_attr: [ docker_floating_ip, floating_ip_address ] }
+  ssh_private_key:
+    description: SSH Private Key
+    value: { get_attr: [ssh_key, private_key] }

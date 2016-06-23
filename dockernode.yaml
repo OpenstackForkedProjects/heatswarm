@@ -1,0 +1,72 @@
+heat_template_version: 2014-10-16
+
+description: Deploys a Docker Swarm
+
+parameters:
+  hostname:
+    type: string
+
+  public_net_id:
+    type: string
+    label: Public Network UUID
+    description: UUID of public network from which floating IP addresses will be allocated
+
+  instance_flavor:
+    type: string
+    label: Flavor
+    default: m1.medium
+    description: Flavor to use for Docker
+    constraints:
+    - allowed_values:
+      - m1.small
+      - m1.medium
+      - m1.large
+      - m1.xlarge
+
+  instance_image:
+    type: string
+    label: Image
+    default: ubuntu_1404_server_cloudimg_amd64
+    description: Image to be used for all servers in this stack
+
+  tenant_network:
+    type: string
+
+  docker_security_group:
+    type: string
+
+  ssh_key:
+    type: string
+
+resources:
+  docker_node_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: tenant_network }
+      security_groups: [{ get_param: docker_security_group }]
+
+  docker_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: { get_param: public_net_id }
+      port_id: { get_resource: docker_node_port }
+
+  docker_node:
+    type: OS::Nova::Server
+    properties:
+      name: {get_param: hostname}
+      image: { get_param: instance_image }
+      flavor: { get_param: instance_flavor }
+      key_name: { get_param: ssh_key }
+      networks:
+        - port: { get_resource: docker_node_port }
+      user_data_format: RAW
+      user_data: |
+        #!/bin/bash
+        apt-get update
+        apt-get -y upgrade
+        apt-get install -y wget software-properties-common
+        wget -q https://test.docker.com/ -O /root/install_docker.sh
+        chmod 755 /root/install_docker.sh
+        /bin/bash /root/install_docker.sh
+        docker swarm join 10.0.2.21:2377
